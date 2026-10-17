@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
+    <!-- Navegador -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
@@ -18,15 +18,15 @@
             <EditText
                 android:id="@+id/urlBar"
                 android:layout_width="0dp"
-                android:layout_height="48dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:hint="Buscar o pegar URL"
-                android:inputType="textUri" />
+                android:hint="Buscar o URL"
+                android:singleLine="true" />
 
             <Button
                 android:id="@+id/btnGo"
                 android:layout_width="wrap_content"
-                android:layout_height="48dp"
+                android:layout_height="wrap_content"
                 android:text="Ir" />
         </LinearLayout>
 
@@ -34,37 +34,49 @@
             android:id="@+id/scanningView"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:visibility="gone"
             android:padding="8dp"
-            android:background="#FFEB3B"
-            android:textColor="#000000" />
+            android:visibility="gone"
+            android:text="Escaneando..." />
 
         <WebView
             android:id="@+id/webView"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1" />
+
     </LinearLayout>
 
+    <!-- Botón flotante lista -->
+    <Button
+        android:id="@+id/btnFloatingPlayer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:visibility="gone"
+        android:text="📋 Ver lista" />
+
+    <!-- Fullscreen video de WebView -->
     <FrameLayout
         android:id="@+id/fullscreenContainer"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone"
-        android:background="#000000" />
+        android:background="@android:color/black" />
 
+    <!-- Overlay reproductor ExoPlayer -->
     <FrameLayout
         android:id="@+id/playerOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone"
-        android:background="#000000">
+        android:background="@android:color/black">
 
         <androidx.media3.ui.PlayerView
             android:id="@+id/playerView"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            app:surface_type="surface_view" />
+            android:keepScreenOn="true" />
 
         <WebView
             android:id="@+id/fallbackWebView"
@@ -80,14 +92,5 @@
             android:layout_margin="16dp"
             android:text="✕ Cerrar" />
     </FrameLayout>
-
-    <Button
-        android:id="@+id/btnFloatingPlayer"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_margin="16dp"
-        android:visibility="gone"
-        android:text="📋 Ver lista" />
 
 </FrameLayout>
