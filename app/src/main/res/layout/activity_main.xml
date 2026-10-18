@@ -1,96 +1,60 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="12dp">
 
-    <!-- Navegador -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:padding="8dp">
-
-            <EditText
-                android:id="@+id/urlBar"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="Buscar o URL"
-                android:singleLine="true" />
-
-            <Button
-                android:id="@+id/btnGo"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Ir" />
-        </LinearLayout>
-
-        <TextView
-            android:id="@+id/scanningView"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:padding="8dp"
-            android:visibility="gone"
-            android:text="Escaneando..." />
-
-        <WebView
-            android:id="@+id/webView"
-            android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1" />
-
-    </LinearLayout>
-
-    <!-- Botón flotante lista -->
-    <Button
-        android:id="@+id/btnFloatingPlayer"
+    <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_margin="16dp"
-        android:visibility="gone"
-        android:text="📋 Ver lista" />
+        android:text="MiNavegador Pro - Player &amp; Extractor"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp"/>
 
-    <!-- Fullscreen video de WebView -->
-    <FrameLayout
-        android:id="@+id/fullscreenContainer"
+    <!-- Sección para pegar enlaces directos o de servidores tipo Mega -->
+    <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:visibility="gone"
-        android:background="@android:color/black" />
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp">
 
-    <!-- Overlay reproductor ExoPlayer -->
-    <FrameLayout
-        android:id="@+id/playerOverlay"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:visibility="gone"
-        android:background="@android:color/black">
-
-        <androidx.media3.ui.PlayerView
-            android:id="@+id/playerView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:keepScreenOn="true" />
-
-        <WebView
-            android:id="@+id/fallbackWebView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:visibility="gone" />
+        <EditText
+            android:id="@+id/etSourceUrl"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="Pega URL (Mega, m3u8, mp4...)"
+            android:inputType="textUri"
+            android:maxLines="1"/>
 
         <Button
-            android:id="@+id/btnClosePlayer"
+            android:id="@+id/btnGo"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_gravity="top|end"
-            android:layout_margin="16dp"
-            android:text="✕ Cerrar" />
-    </FrameLayout>
+            android:text="Ir / Extraer"
+            android:layout_marginStart="4dp"/>
+    </LinearLayout>
 
-</FrameLayout>
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Streams Detectados para Reproducir:"
+        android:textStyle="bold"
+        android:layout_marginBottom="4dp"/>
+
+    <ListView
+        android:id="@+id/lvResults"
+        android:layout_width="match_parent"
+        android:layout_height="110dp"
+        android:background="#F0F0F0"
+        android:layout_marginBottom="8dp"/>
+
+    <WebView
+        android:id="@+id/webViewMain"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"/>
+
+</LinearLayout>
