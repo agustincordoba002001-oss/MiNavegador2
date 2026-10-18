@@ -1,60 +1,157 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="12dp">
+    android:background="#121212">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="MiNavegador Pro - Player &amp; Extractor"
-        android:textSize="16sp"
-        android:textStyle="bold"
-        android:layout_marginBottom="8dp"/>
-
-    <!-- Sección para pegar enlaces directos o de servidores tipo Mega -->
+    <!-- Barra superior de navegación y controles -->
     <LinearLayout
+        android:id="@+id/topBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginBottom="8dp">
+        android:padding="6dp"
+        android:background="#1F1F1F"
+        android:gravity="center_vertical">
+
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="36dp"
+            android:layout_height="40dp"
+            android:text="&lt;"
+            android:textSize="14sp"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#333333" />
+
+        <Button
+            android:id="@+id/btnForward"
+            android:layout_width="36dp"
+            android:layout_height="40dp"
+            android:text="&gt;"
+            android:textSize="14sp"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#333333"
+            android:layout_marginStart="2dp" />
 
         <EditText
             android:id="@+id/etSourceUrl"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="40dp"
             android:layout_weight="1"
-            android:hint="Pega URL (Mega, m3u8, mp4...)"
-            android:inputType="textUri"
-            android:maxLines="1"/>
+            android:hint="Buscar o ingresar URL..."
+            android:textColor="@android:color/white"
+            android:textColorHint="#888888"
+            android:textSize="11sp"
+            android:singleLine="true"
+            android:backgroundTint="#555555"
+            android:layout_marginStart="2dp"
+            android:layout_marginEnd="2dp"
+            android:padding="6dp" />
+
+        <Button
+            android:id="@+id/btnArmPlayClick"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:text="Avisar Dar Play"
+            android:textSize="9sp"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#FF9800"
+            android:layout_marginEnd="2dp" />
+
+        <Button
+            android:id="@+id/btnPasteM3u"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:text="Pegar M3U"
+            android:textSize="9sp"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#3F51B5"
+            android:layout_marginEnd="2dp" />
 
         <Button
             android:id="@+id/btnGo"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Ir / Extraer"
-            android:layout_marginStart="4dp"/>
+            android:layout_height="40dp"
+            android:text="Ir"
+            android:textSize="11sp"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#4CAF50"
+            android:layout_marginEnd="2dp" />
+
+        <Button
+            android:id="@+id/btnRefresh"
+            android:layout_width="36dp"
+            android:layout_height="40dp"
+            android:text="⟳"
+            android:textSize="14sp"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#333333" />
     </LinearLayout>
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Streams Detectados para Reproducir:"
-        android:textStyle="bold"
-        android:layout_marginBottom="4dp"/>
-
-    <ListView
-        android:id="@+id/lvResults"
+    <ProgressBar
+        android:id="@+id/progressBar"
+        style="?android:attr/progressBarStyleHorizontal"
         android:layout_width="match_parent"
-        android:layout_height="110dp"
-        android:background="#F0F0F0"
-        android:layout_marginBottom="8dp"/>
+        android:layout_height="4dp"
+        android:layout_below="@id/topBar"
+        android:indeterminate="false"
+        android:progressDrawable="@android:drawable/progress_horizontal" />
 
     <WebView
-        android:id="@+id/webViewMain"
+        android:id="@+id/webView"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"/>
+        android:layout_height="match_parent"
+        android:layout_below="@id/topBar" />
 
-</LinearLayout>
+    <LinearLayout
+        android:id="@+id/panelInterceptions"
+        android:layout_width="match_parent"
+        android:layout_height="220dp"
+        android:orientation="vertical"
+        android:background="#E61E1E1E"
+        android:padding="8dp"
+        android:visibility="gone"
+        android:elevation="15dp"
+        android:layout_alignParentBottom="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingBottom="4dp">
+
+            <TextView
+                android:id="@+id/tvInterceptionCount"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Streams Encontrados (0)"
+                android:textColor="#4CAF50"
+                android:textStyle="bold"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:id="@+id/btnCloseInterceptions"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="#D32F2F"
+                android:gravity="center">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="X"
+                    android:textColor="@android:color/white"
+                    android:textStyle="bold" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <ListView
+            android:id="@+id/listViewInterceptions"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:divider="#33FFFFFF"
+            android:dividerHeight="1dp" />
+    </LinearLayout>
+
+</RelativeLayout>
