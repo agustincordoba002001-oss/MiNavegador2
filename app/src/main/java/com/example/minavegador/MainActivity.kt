@@ -1,359 +1,485 @@
 package com.example.minavegador
 
-import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
+import android.graphics.Color
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.view.View
-import android.webkit.*
-import android.widget.*
-import androidx.appcompat.app.AlertDialog
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.ServiceWorkerClient
+import android.webkit.ServiceWorkerController
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.Button
+import android.widget.EditText
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import java.net.URLEncoder
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), VideoSnifferManager.VideoSnifferListener {
 
-    private lateinit var etSourceUrl: EditText
-    private lateinit var btnGo: Button
-    private lateinit var btnBack: Button
-    private lateinit var btnForward: Button
-    private lateinit var btnRefresh: Button
-    private lateinit var btnPasteM3u: Button
-    private lateinit var btnArmPlayClick: Button
     private lateinit var webView: WebView
-    private lateinit var progressBar: ProgressBar
+    private lateinit var etUrl: EditText
+    private lateinit var btnGo: Button
+    private lateinit var btnLibrary: Button
+    private lateinit var btnExtractAll: Button
+    private lateinit var btnDetectedVideos: Button
+    private lateinit var btnM3uAnalyzer: Button
+    private lateinit var btnPlayCurrentVideo: Button
 
-    private lateinit var panelInterceptions: LinearLayout
-    private lateinit var listViewInterceptions: ListView
-    private lateinit var btnCloseInterceptions: LinearLayout
-    private lateinit var tvInterceptionCount: TextView
+    @Volatile
+    private var currentTitle: String = "Video Detectado"
 
-    private val interceptedUrlsList = ArrayList<String>()
-    private lateinit var interceptionAdapter: ArrayAdapter<String>
+    @Volatile
+    private var hasAutoOpenedPlayer: Boolean = false
 
-    private var isPlayClickArmed = false
-    private val armHandler = Handler(Looper.getMainLooper())
-    private val resetArmRunnable = Runnable {
-        disarmPlayClickState()
-    }
+    @Volatile
+    private var currentPageUrl: String? = null
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        AdFilterEngine.initialize(applicationContext)
 
-        initializeUIComponents()
-        configureBrowserEngine()
-        setupEventHandlers()
-
-        if (savedInstanceState == null) {
-            loadInitialUrl("https://www.google.com")
-        }
-    }
-
-    private fun initializeUIComponents() {
-        etSourceUrl = findViewById(R.id.etSourceUrl)
-        btnGo = findViewById(R.id.btnGo)
-        btnBack = findViewById(R.id.btnBack)
-        btnForward = findViewById(R.id.btnForward)
-        btnRefresh = findViewById(R.id.btnRefresh)
-        btnPasteM3u = findViewById(R.id.btnPasteM3u)
-        btnArmPlayClick = findViewById(R.id.btnArmPlayClick)
+        // Componentes de la interfaz
         webView = findViewById(R.id.webView)
-        progressBar = findViewById(R.id.progressBar)
+        etUrl = findViewById(R.id.etUrl)
+        btnGo = findViewById(R.id.btnGo)
+        btnLibrary = findViewById(R.id.btnLibrary)
+        btnExtractAll = findViewById(R.id.btnExtractAll)
+        btnDetectedVideos = findViewById(R.id.btnDetectedVideos)
+        btnM3uAnalyzer = findViewById(R.id.btnM3uAnalyzer)
+        btnPlayCurrentVideo = findViewById(R.id.btnPlayCurrentVideo)
 
-        panelInterceptions = findViewById(R.id.panelInterceptions)
-        listViewInterceptions = findViewById(R.id.listViewInterceptions)
-        btnCloseInterceptions = findViewById(R.id.btnCloseInterceptions)
-        tvInterceptionCount = findViewById(R.id.tvInterceptionCount)
+        // Configuración máxima anti-popups y anti-anuncios
+        webView.settings.javaScriptEnabled = true
+        webView.settings.domStorageEnabled = true
+        webView.settings.loadsImagesAutomatically = true
+        webView.settings.javaScriptCanOpenWindowsAutomatically = false
+        webView.settings.setSupportMultipleWindows(false)
+        webView.settings.mediaPlaybackRequiresUserGesture = false
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            webView.settings.safeBrowsingEnabled = true
+        }
 
-        interceptionAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, interceptedUrlsList)
-        listViewInterceptions.adapter = interceptionAdapter
-    }
+        ServiceWorkerController.getInstance().setServiceWorkerClient(object : ServiceWorkerClient() {
+            override fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? {
+                return blockedAdResponse(
+                    request.url.toString(),
+                    currentPageUrl,
+                    request.isForMainFrame,
+                    request.requestHeaders
+                )
+            }
+        })
 
-    @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
-    private fun configureBrowserEngine() {
-        val settings: WebSettings = webView.settings
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        settings.databaseEnabled = true
-        settings.loadWithOverviewMode = true
-        settings.useWideViewPort = true
-        settings.builtInZoomControls = true
-        settings.displayZoomControls = false
-        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
-
-        // Bloqueo estricto de ventanas múltiples y automáticas
-        settings.javaScriptCanOpenWindowsAutomatically = false
-        settings.setSupportMultipleWindows(false)
-
-        // MODO MÓVIL REAL (Evita vista de computadora y baja la publicidad de escritorio)
-        settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.64 Mobile Safari/537.36"
-
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(webView, true)
-
-        webView.addJavascriptInterface(WebAppInterface(), "UniversalSnifferBridge")
+        webView.addJavascriptInterface(WebAppInterface(this), "AndroidInterface")
+        webView.addJavascriptInterface(VideoSnifferInterface(), "AndroidVideoSniffer")
 
         webView.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                super.onProgressChanged(view, newProgress)
-                progressBar.progress = newProgress
-                progressBar.visibility = if (newProgress == 100) View.GONE else View.VISIBLE
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                super.onReceivedTitle(view, title)
+                if (!title.isNullOrEmpty()) {
+                    currentTitle = title
+                }
             }
 
-            override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
-                return false // Bloquea cualquier intento de abrir popups via JS window.open
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: android.os.Message?
+            ): Boolean {
+                // BLOQUEO ABSOLUTO DE VENTANAS EMERGENTES
+                return false
             }
         }
 
         webView.webViewClient = object : WebViewClient() {
-
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                clearInterceptedVideos()
-            }
-
-            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                val url = request?.url?.toString() ?: return false
-
-                // Si el modo "Avisar Dar Play" NO está armado, bloqueamos redirecciones sospechosas a páginas externas
-                if (!isPlayClickArmed && isAdOrPopupUrl(url)) {
-                    return true // Bloquea la navegación publicitaria
-                }
-
-                evaluateUniversalUrl(url)
-                return false
-            }
-
-            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
-                if (url != null) {
-                    if (!isPlayClickArmed && isAdOrPopupUrl(url)) {
-                        return true
-                    }
-                    evaluateUniversalUrl(url)
-                }
-                return false
-            }
-
-            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                val url = request?.url?.toString() ?: ""
-                if (url.isNotEmpty()) {
-                    // Bloqueo de peticiones a redes publicitarias conocidas en la red
-                    if (isAdOrPopupUrl(url)) {
-                        return WebResourceResponse("text/plain", "utf-8", null) // Devuelve respuesta vacía
-                    }
-                    evaluateUniversalUrl(url)
-                }
-                return super.shouldInterceptRequest(view, request)
+                currentPageUrl = url
+                currentTitle = "Video Detectado"
+                hasAutoOpenedPlayer = false
+                VideoSnifferManager.clear()
+                injectVideoSnifferScript()
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                if (url != null && !etSourceUrl.hasFocus()) {
-                    etSourceUrl.setText(url)
+                if (url != null) {
+                    currentPageUrl = url
+                    etUrl.setText(url)
                 }
-                // Inyecta el Bloqueador de Anuncios y el Sniffer de video
-                injectAdBlockAndSniffer(view)
+                view?.title?.let {
+                    if (it.isNotEmpty()) currentTitle = it
+                }
+                injectVideoSnifferScript()
             }
+
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): Boolean {
+                val url = request?.url?.toString() ?: return false
+
+                if (AdFilterEngine.shouldBlock(url, currentPageUrl, request.isForMainFrame)) {
+                    return true
+                }
+
+                if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                    return true
+                }
+
+                return false
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                if (request != null) {
+                    val reqUrl = request.url.toString()
+                    blockedAdResponse(
+                        reqUrl,
+                        currentPageUrl,
+                        request.isForMainFrame,
+                        request.requestHeaders
+                    )?.let { return it }
+
+                    // 3. CAPTURAR ENLACES DE VIDEO
+                    val headers = request.requestHeaders ?: emptyMap()
+                    VideoSnifferManager.addVideoIfValid(reqUrl, currentTitle, headers, isPrimaryPlay = false)
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+        }
+
+        // Cargar lamovie.org por defecto al iniciar la app
+        webView.loadUrl("https://lamovie.org")
+
+        // Botón Ir / Navegar
+        btnGo.setOnClickListener {
+            var url = etUrl.text.toString().trim()
+            if (url.isNotEmpty()) {
+                if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                    url = "https://$url"
+                }
+                webView.loadUrl(url)
+            }
+        }
+
+        // BOTÓN "▶ REPRODUCIR EN APP": Reproduce directamente el video de la página a demanda
+        btnPlayCurrentVideo.setOnClickListener {
+            val detectedVideos = VideoSnifferManager.getDetectedVideos()
+            if (detectedVideos.isNotEmpty()) {
+                val topVideo = detectedVideos.first()
+                Toast.makeText(this, "🎬 Reproduciendo video en el reproductor...", Toast.LENGTH_SHORT).show()
+                val intent = Intent(this, PlayerActivity::class.java).apply {
+                    putExtra("video_url", topVideo.url)
+                    putExtra("video_title", topVideo.title)
+                    putExtra("video_referer", webView.url ?: "https://lamovie.org")
+                    putExtra("video_headers_json", JSONObject(topVideo.headers).toString())
+                }
+                startActivity(intent)
+            } else {
+                val forceScanJs = """
+                    (function() {
+                        var v = document.querySelector('video');
+                        if (v) {
+                            var src = v.currentSrc || v.src;
+                            if (src) {
+                                AndroidVideoSniffer.onAutoPlayVideoDetected(src, document.title || 'Video');
+                                return;
+                            }
+                        }
+                        var iframes = document.querySelectorAll('iframe');
+                        iframes.forEach(function(f) {
+                            if (f.src && (f.src.includes('video') || f.src.includes('embed') || f.src.includes('player'))) {
+                                AndroidVideoSniffer.onVideoDetected(f.src, document.title || 'Video Iframe');
+                            }
+                        });
+                    })();
+                """.trimIndent()
+                webView.evaluateJavascript(forceScanJs, null)
+                Toast.makeText(this, "Buscando reproductor de video en la página...", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // Botón Videos Detectados
+        btnDetectedVideos.setOnClickListener {
+            val dialog = DetectedVideosDialog()
+            dialog.show(supportFragmentManager, "DetectedVideosDialog")
+        }
+
+        // Botón Analizador M3U / M3U8
+        btnM3uAnalyzer.setOnClickListener {
+            val dialog = M3uAnalyzerDialog.newInstance("")
+            dialog.show(supportFragmentManager, "M3uAnalyzerDialog")
+        }
+
+        // Botón Biblioteca
+        btnLibrary.setOnClickListener {
+            val intent = Intent(this, LibraryActivity::class.java)
+            startActivity(intent)
+        }
+
+        // Botón Extracción
+        btnExtractAll.setOnClickListener {
+            val javascriptScraper = """
+                (function() {
+                    let results = [];
+                    let elements = document.querySelectorAll('a, source, video, iframe');
+                    elements.forEach(el => {
+                        let src = el.getAttribute('href') || el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('data-url');
+                        if (src) {
+                            src = src.trim();
+                            if (src.includes('.m3u8') || src.includes('.mp4') || src.includes('manifest')) {
+                                let title = el.innerText || el.getAttribute('title') || el.getAttribute('alt') || document.title;
+                                if (src.startsWith('/')) {
+                                    src = window.location.origin + src;
+                                } else if (!src.startsWith('http') && !src.startsWith('blob')) {
+                                    src = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1) + src;
+                                }
+                                results.push({ title: title.trim().substring(0, 80), url: src });
+                            }
+                        }
+                    });
+
+                    let unique = Array.from(new Set(results.map(a => a.url)))
+                        .map(url => {
+                            return results.find(a => a.url === url);
+                        });
+
+                    AndroidInterface.saveBulkVideos(JSON.stringify(unique));
+                })();
+            """.trimIndent()
+
+            webView.evaluateJavascript(javascriptScraper, null)
+            Toast.makeText(this, "Escaneando y probando enlaces de la página...", Toast.LENGTH_SHORT).show()
         }
     }
 
-    // Filtro para detectar dominios típicos de publicidad y popups
-    private fun isAdOrPopupUrl(url: String): Boolean {
-        val lower = url.lowercase()
-        return lower.contains("googlesyndication") ||
-                lower.contains("google-analytics") ||
-                lower.contains("doubleclick") ||
-                lower.contains("popads") ||
-                lower.contains("popcash") ||
-                lower.contains("juicyads") ||
-                lower.contains("trafficjunky") ||
-                lower.contains("adsterra") ||
-                lower.contains("exoclick")
+    override fun onResume() {
+        super.onResume()
+        VideoSnifferManager.addListener(this)
+        updateDetectedVideosButton(VideoSnifferManager.getDetectedCount())
     }
 
-    // Extensión Inyectada: AdBlock + Sniffer de Video Universal
-    private fun injectAdBlockAndSniffer(view: WebView?) {
-        val extensionScript = """
-            (function() {
-                // 1. EXTENSIÓN BLOQUEADOR DE ANUNCIOS (AdBlock)
-                var adSelectors = [
-                    'iframe[src*="ads"]', 'iframe[src*="popup"]', 'iframe[src*="banner"]',
-                    '.adsbox', '.ad-banner', '.advertisement', '#announcement',
-                    'div[id*="ad_"]', 'div[class*="banner-ad"]', 'div[class*="ads-"]'
-                ];
-                
-                function removeAds() {
-                    adSelectors.forEach(function(sel) {
-                        document.querySelectorAll(sel).forEach(function(el) {
-                            el.remove();
-                        });
-                    });
-                }
-                setInterval(removeAds, 1000);
+    override fun onPause() {
+        super.onPause()
+        VideoSnifferManager.removeListener(this)
+    }
 
-                // Neutralizar redirecciones de anuncios en clics
-                document.addEventListener('click', function(e) {
-                    if (!window.__playClickArmed) {
-                        var target = e.target.closest('a');
-                        if (target && target.getAttribute('target') === '_blank') {
-                            e.preventDefault();
+    override fun onVideoDetected(video: DetectedVideo, totalCount: Int) {
+        updateDetectedVideosButton(totalCount)
+    }
+
+    override fun onVideosCleared() {
+        updateDetectedVideosButton(0)
+    }
+
+    private fun updateDetectedVideosButton(count: Int) {
+        btnDetectedVideos.text = "🎬 Videos ($count)"
+        if (count > 0) {
+            btnDetectedVideos.setBackgroundColor(Color.parseColor("#FF6D00"))
+            btnPlayCurrentVideo.setBackgroundColor(Color.parseColor("#E53935"))
+        } else {
+            btnDetectedVideos.setBackgroundColor(Color.parseColor("#424242"))
+            btnPlayCurrentVideo.setBackgroundColor(Color.parseColor("#757575"))
+        }
+    }
+
+    private fun blockedAdResponse(
+        url: String,
+        topPageUrl: String?,
+        isMainFrame: Boolean,
+        requestHeaders: Map<String, String> = emptyMap()
+    ): WebResourceResponse? {
+        if (!AdFilterEngine.shouldBlock(url, topPageUrl, isMainFrame, requestHeaders)) return null
+        return WebResourceResponse(
+            "text/plain",
+            "UTF-8",
+            204,
+            "No Content",
+            mapOf("Cache-Control" to "no-store"),
+            AdBlocker.createEmptyResponse()
+        )
+    }
+
+    private fun injectVideoSnifferScript() {
+        val jsSniffer = """
+            (function() {
+                if (window.__stealthBypassInjected) return;
+                window.__stealthBypassInjected = true;
+
+                // Block script-created windows and common cosmetic ad containers.
+                try {
+                    Object.defineProperty(window, 'open', {
+                        value: function() { return null; },
+                        writable: false,
+                        configurable: false
+                    });
+                } catch(e) {}
+
+                var style = document.createElement('style');
+                style.type = 'text/css';
+                style.innerHTML = `
+                    .adsbygoogle, .ad-container, .ad-box, .ad-wrapper, .ad-placement, .ad-holder,
+                    [class~="ad"], [class~="ads"], [id~="ad"], [data-ad], [data-ad-slot],
+                    [data-ad-unit], [class*="advertisement"], [id*="advertisement"],
+                    [class*="ad-banner"], [id*="ad-banner"], [class*="floating-ad"],
+                    [class*="sticky-ad"], [class*="popunder"], [class*="popup-ad"],
+                    [id*="popup-ad"], iframe[src*="doubleclick.net"],
+                    iframe[src*="googlesyndication.com"], iframe[src*="adnxs.com"] {
+                        display: none !important;
+                        visibility: hidden !important;
+                        opacity: 0 !important;
+                        pointer-events: none !important;
+                    }
+                `;
+                (document.head || document.documentElement).appendChild(style);
+
+                function reportVideo(url, isAutoPlay) {
+                    if (!url || typeof url !== 'string') return;
+                    url = url.trim();
+                    if (url.startsWith('/')) {
+                        url = window.location.origin + url;
+                    } else if (!url.startsWith('http') && !url.startsWith('blob:') && !url.startsWith('data:')) {
+                        url = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1) + url;
+                    }
+                    if (url.includes('.m3u8') || url.includes('.m3u') || url.includes('.mp4') || url.includes('.mpd') || url.includes('.webm') || url.includes('hls') || url.includes('embed') || url.includes('player')) {
+                        if (window.AndroidVideoSniffer) {
+                            if (isAutoPlay && window.AndroidVideoSniffer.onAutoPlayVideoDetected) {
+                                window.AndroidVideoSniffer.onAutoPlayVideoDetected(url, document.title || 'Video en Reproducción');
+                            } else if (window.AndroidVideoSniffer.onVideoDetected) {
+                                window.AndroidVideoSniffer.onVideoDetected(url, document.title || 'Video Detectado');
+                            }
                         }
                     }
-                }, true);
+                }
 
-                // Anular window.open de publicidad
-                window.open = function() { return null; };
-
-                // 2. SNIFFER UNIVERSAL DE VIDEOS
-                if (window.__snifferLoaded) return;
-                window.__snifferLoaded = true;
-
-                function scanVideos() {
-                    document.querySelectorAll('video, source').forEach(function(el) {
-                        var src = el.src || el.getAttribute('src');
-                        if (src && src.length > 5) {
-                            window.UniversalSnifferBridge.reportUrl(src);
+                function scanIframes() {
+                    var iframes = document.querySelectorAll('iframe');
+                    iframes.forEach(function(f) {
+                        if (f.src) {
+                            reportVideo(f.src, false);
                         }
                     });
                 }
-                setInterval(scanVideos, 1500);
+
+                function attachVideoListeners() {
+                    scanIframes();
+                    var videos = document.querySelectorAll('video');
+                    videos.forEach(function(v) {
+                        if (v.__hasSnifferListener) return;
+                        v.__hasSnifferListener = true;
+
+                        var handlePlay = function() {
+                            if (v.__hasFiredPlay) return;
+                            if (v.duration && v.duration < 12) return;
+                            v.__hasFiredPlay = true;
+                            var src = v.currentSrc || v.src;
+                            if (src) {
+                                reportVideo(src, true);
+                            }
+                        };
+
+                        v.addEventListener('play', handlePlay);
+                        v.addEventListener('playing', handlePlay);
+                        v.addEventListener('canplay', handlePlay);
+                        v.addEventListener('click', handlePlay);
+                    });
+                }
 
                 var origOpen = XMLHttpRequest.prototype.open;
                 XMLHttpRequest.prototype.open = function(method, url) {
-                    if (url && typeof url === 'string') {
-                        window.UniversalSnifferBridge.reportUrl(url);
-                    }
+                    reportVideo(url, false);
                     return origOpen.apply(this, arguments);
                 };
 
-                var origFetch = window.fetch;
-                if (origFetch) {
-                    window.fetch = function() {
-                        var args = arguments;
-                        if (args[0]) {
-                            var url = (typeof args[0] === 'string') ? args[0] : args[0].url;
-                            if (url && typeof url === 'string') {
-                                window.UniversalSnifferBridge.reportUrl(url);
-                            }
+                if (window.fetch) {
+                    var origFetch = window.fetch;
+                    window.fetch = function(input, init) {
+                        if (typeof input === 'string') {
+                            reportVideo(input, false);
+                        } else if (input && input.url) {
+                            reportVideo(input.url, false);
                         }
                         return origFetch.apply(this, arguments);
                     };
                 }
+
+                attachVideoListeners();
+                setInterval(attachVideoListeners, 1000);
             })();
         """.trimIndent()
-        view?.evaluateJavascript(extensionScript, null)
+
+        webView.evaluateJavascript(jsSniffer, null)
+
+        val cosmeticCss = AdFilterEngine.cosmeticCss(webView.url)
+        if (cosmeticCss.isNotEmpty()) {
+            val quotedCss = JSONObject.quote(cosmeticCss)
+            webView.evaluateJavascript(
+                """
+                    (function() {
+                        var style = document.getElementById('__mi_navegador_ad_filters');
+                        if (!style) {
+                            style = document.createElement('style');
+                            style.id = '__mi_navegador_ad_filters';
+                            (document.head || document.documentElement).appendChild(style);
+                        }
+                        style.textContent = $quotedCss;
+                    })();
+                """.trimIndent(),
+                null
+            )
+        }
     }
 
-    inner class WebAppInterface {
+    override fun onBackPressed() {
+        if (webView.canGoBack()) {
+            webView.goBack()
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    inner class VideoSnifferInterface {
         @JavascriptInterface
-        fun reportUrl(url: String) {
-            evaluateUniversalUrl(url)
-        }
-    }
-
-    private fun evaluateUniversalUrl(url: String) {
-        if (url.isEmpty() || url.startsWith("javascript:") || url.startsWith("data:")) return
-
-        val lower = url.lowercase()
-
-        if (lower.contains(".js") || lower.contains(".css") || lower.contains(".png") || lower.contains(".jpg") ||
-            lower.contains(".ico") || lower.contains(".woff") || lower.contains(".ts") ||
-            lower.contains("segment") || lower.contains("fragment") || isAdOrPopupUrl(lower)) {
-            return
-        }
-
-        if (lower.contains(".m3u8") || lower.contains(".m3u") || lower.contains(".mpd") ||
-            lower.contains(".mp4") || lower.contains(".m4v") || lower.contains(".webm") ||
-            lower.contains("playlist") || lower.contains("manifest") || lower.contains("master") ||
-            lower.contains("videoplayback") || lower.contains("stream") || lower.contains("hls")) {
-
+        fun onVideoDetected(url: String, title: String) {
             runOnUiThread {
-                addInterceptedVideo(url)
-            }
-        }
-    }
-
-    private fun addInterceptedVideo(url: String) {
-        synchronized(interceptedUrlsList) {
-            if (!interceptedUrlsList.contains(url)) {
-                if (url.contains("master", ignoreCase = true) || url.contains("playlist", ignoreCase = true) || url.contains("m3u8", ignoreCase = true)) {
-                    interceptedUrlsList.add(0, url)
-                } else {
-                    interceptedUrlsList.add(url)
-                }
-                interceptionAdapter.notifyDataSetChanged()
-                tvInterceptionCount.text = "Streams Encontrados (${interceptedUrlsList.size})"
-                panelInterceptions.visibility = View.VISIBLE
-            }
-        }
-    }
-
-    private fun clearInterceptedVideos() {
-        runOnUiThread {
-            synchronized(interceptedUrlsList) {
-                interceptedUrlsList.clear()
-                interceptionAdapter.notifyDataSetChanged()
-                panelInterceptions.visibility = View.GONE
-                tvInterceptionCount.text = "Streams Encontrados (0)"
-            }
-        }
-    }
-
-    private fun setupEventHandlers() {
-        btnGo.setOnClickListener {
-            val rawUrl = etSourceUrl.text.toString().trim()
-            if (rawUrl.isNotEmpty()) {
-                clearInterceptedVideos()
-                loadInitialUrl(rawUrl)
-            } else {
-                Toast.makeText(this, "Ingresa una URL", Toast.LENGTH_SHORT).show()
+                VideoSnifferManager.addVideoIfValid(url, title, isPrimaryPlay = false)
             }
         }
 
-        btnPasteM3u.setOnClickListener {
-            showPasteWebUrlDialog()
-        }
-
-        // BOTÓN CORREGIDO: "Avisar Dar Play"
-        btnArmPlayClick.setOnClickListener {
-            armPlayClickState()
-        }
-
-        btnBack.setOnClickListener {
-            if (webView.canGoBack()) {
-                clearInterceptedVideos()
-                webView.goBack()
+        @JavascriptInterface
+        fun onPrimaryVideoDetected(url: String, title: String) {
+            runOnUiThread {
+                VideoSnifferManager.addVideoIfValid(url, title, isPrimaryPlay = true)
             }
         }
 
-        btnForward.setOnClickListener {
-            if (webView.canGoForward()) {
-                clearInterceptedVideos()
-                webView.goForward()
-            }
-        }
+        @JavascriptInterface
+        fun onAutoPlayVideoDetected(url: String, title: String) {
+            runOnUiThread {
+                VideoSnifferManager.addVideoIfValid(url, title, isPrimaryPlay = true)
 
-        btnRefresh.setOnClickListener {
-            clearInterceptedVideos()
-            webView.reload()
-        }
-
-        btnCloseInterceptions.setOnClickListener {
-            panelInterceptions.visibility = View.GONE
-        }
-
-        listViewInterceptions.setOnItemClickListener { _, _, position, _ ->
-            synchronized(interceptedUrlsList) {
-                if (position < interceptedUrlsList.size) {
-                    val selectedUrl = interceptedUrlsList[position]
-                    val intent = Intent(this, PlayerActivity::class.java).apply {
-                        putExtra("EXTRA_VIDEO_URL", selectedUrl)
+                // Abrir automáticamente en el reproductor ÚNICAMENTE UNA VEZ por carga de página
+                if (!isFinishing && url.isNotEmpty() && !hasAutoOpenedPlayer) {
+                    hasAutoOpenedPlayer = true
+                    Toast.makeText(this@MainActivity, "🎬 Abriendo reproductor...", Toast.LENGTH_SHORT).show()
+                    val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
+                        putExtra("video_url", url)
+                        putExtra("video_title", if (title.isNotBlank()) title else currentTitle)
+                        putExtra("video_referer", webView.url ?: "https://lamovie.org")
                     }
                     startActivity(intent)
                 }
@@ -361,74 +487,42 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun armPlayClickState() {
-        isPlayClickArmed = true
-        btnArmPlayClick.text = "¡DA PLAY AHORA!"
-        btnArmPlayClick.setBackgroundColor(android.graphics.Color.parseColor("#4CAF50"))
-        Toast.makeText(this, "Modo Play Armado (6 segs). Toca el botón Play del video en la web.", Toast.LENGTH_LONG).show()
+    class WebAppInterface(private val context: Context) {
+        @JavascriptInterface
+        fun saveBulkVideos(jsonString: String) {
+            try {
+                val jsonArray = JSONArray(jsonString)
+                val db = AppDatabase.getDatabase(context)
+                var count = 0
 
-        // Habilita temporalmente el gesto de clic para reproducir y bloquea exhaustivamente todo lo demás
-        webView.evaluateJavascript("""
-            (function() {
-                window.__playClickArmed = true;
-                setTimeout(function() {
-                    window.__playClickArmed = false;
-                    window.open = function() { return null; };
-                }, 6000);
-            })();
-        """.trimIndent(), null)
+                CoroutineScope(Dispatchers.IO).launch {
+                    for (i in 0 until jsonArray.length()) {
+                        val obj = jsonArray.getJSONObject(i)
+                        val title = obj.getString("title")
+                        val url = obj.getString("url")
 
-        armHandler.removeCallbacks(resetArmRunnable)
-        armHandler.postDelayed(resetArmRunnable, 6000)
-    }
-
-    private fun disarmPlayClickState() {
-        isPlayClickArmed = false
-        btnArmPlayClick.text = "Avisar Dar Play"
-        btnArmPlayClick.setBackgroundColor(android.graphics.Color.parseColor("#FF9800"))
-        webView.evaluateJavascript("window.open = function() { return null; };", null)
-    }
-
-    private fun showPasteWebUrlDialog() {
-        val input = EditText(this)
-        input.hint = "Pega aquí la URL de la página web o M3U"
-
-        AlertDialog.Builder(this)
-            .setTitle("Pegar Enlace Web / M3U")
-            .setView(input)
-            .setPositiveButton("Ir a la página") { _, _ ->
-                val typedUrl = input.text.toString().trim()
-                if (typedUrl.isNotEmpty()) {
-                    clearInterceptedVideos()
-                    loadInitialUrl(typedUrl)
-                } else {
-                    Toast.makeText(this, "El enlace está vacío", Toast.LENGTH_SHORT).show()
+                        if (url.isNotEmpty() && !url.startsWith("blob:") && db.videoDao().existsByUrl(url) == 0) {
+                            db.videoDao().insertVideo(
+                                ApprovedVideo(
+                                    title = if (title.isNullOrEmpty()) "Capítulo ${i + 1}" else title,
+                                    videoUrl = url,
+                                    thumbnailUrl = "https://via.placeholder.com/300x169.png?text=Capítulo"
+                                )
+                            )
+                            count++
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            context,
+                            "¡Se guardaron $count capítulos nuevos en la Biblioteca!",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
-    private fun loadInitialUrl(url: String) {
-        var targetUrl = url
-        if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
-            if (targetUrl.contains(".") && !targetUrl.contains(" ")) {
-                targetUrl = "https://$targetUrl"
-            } else {
-                targetUrl = "https://www.google.com/search?q=" + URLEncoder.encode(targetUrl, "UTF-8")
-            }
-        }
-        webView.loadUrl(targetUrl)
-    }
-
-    override fun onBackPressed() {
-        if (panelInterceptions.visibility == View.VISIBLE) {
-            panelInterceptions.visibility = View.GONE
-        } else if (webView.canGoBack()) {
-            clearInterceptedVideos()
-            webView.goBack()
-        } else {
-            super.onBackPressed()
         }
     }
 }

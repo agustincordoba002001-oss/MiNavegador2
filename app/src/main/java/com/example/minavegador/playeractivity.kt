@@ -1,573 +1,371 @@
 package com.example.minavegador
 
-import android.Manifest
-import android.app.DownloadManager
-import android.content.Context
-import android.content.pm.PackageManager
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.net.Uri
-import android.net.wifi.WifiManager
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.view.View
-import android.widget.ArrayAdapter
+import android.provider.Settings
 import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ListView
 import android.widget.Toast
+import android.webkit.CookieManager
+import androidx.annotation.OptIn
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import androidx.mediarouter.app.MediaRouteButton
-import androidx.mediarouter.media.MediaControlIntent
-import androidx.mediarouter.media.MediaRouteSelector
-import androidx.mediarouter.media.MediaRouter
+import com.google.android.gms.cast.MediaInfo
+import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.framework.CastButtonFactory
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.HttpURLConnection
-import java.net.InetAddress
-import java.net.URL
-import kotlin.concurrent.thread
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManagerListener
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 class PlayerActivity : AppCompatActivity() {
 
-    private var player: ExoPlayer? = null
-    private lateinit var playerView: PlayerView
-    private lateinit var mediaRouteButton: MediaRouteButton
-    private lateinit var btnScanDlna: Button
-    private lateinit var btnListM3u8: Button
-    private lateinit var btnDownloadVideo: Button
-    private lateinit var btnPasteM3u: Button
+    private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var exoPlayer: ExoPlayer? = null
+    private var castContext: CastContext? = null
+    private var videoUrl: String? = null
+    private var videoTitle: String = "Reproduciendo Video"
+    private var videoReferer: String? = null
+    private var videoHeaders: Map<String, String> = emptyMap()
+    private var mediaRelayServer: LocalMediaRelayServer? = null
+    private var castMediaLoaded = false
 
-    private lateinit var panelM3u8List: LinearLayout
-    private lateinit var listViewM3u8: ListView
-    private lateinit var btnClosePanel: Button
+    private val castSessionListener = object : SessionManagerListener<CastSession> {
+        override fun onSessionStarting(session: CastSession) {
+            castMediaLoaded = false
+        }
 
-    private var mediaRouter: MediaRouter? = null
-    private var mediaRouteSelector: MediaRouteSelector? = null
-    private var multicastLock: WifiManager.MulticastLock? = null
-    private var currentVideoUrl: String? = null
+        override fun onSessionStarted(session: CastSession, sessionId: String) {
+            sendVideoToTv(session)
+        }
 
-    private val m3u8ItemsList = ArrayList<String>()
-    private lateinit var listAdapter: ArrayAdapter<String>
+        override fun onSessionStartFailed(session: CastSession, error: Int) {
+            Toast.makeText(this@PlayerActivity, "No se pudo conectar con Google Cast", Toast.LENGTH_LONG).show()
+        }
 
-    data class TvDevice(val name: String, val ip: String, val locationUrl: String)
-    private val discoveredDevices = ArrayList<TvDevice>()
-    private var connectedTv: TvDevice? = null
+        override fun onSessionEnding(session: CastSession) = Unit
 
+        override fun onSessionEnded(session: CastSession, error: Int) {
+            castMediaLoaded = false
+            exoPlayer?.play()
+        }
+
+        override fun onSessionResuming(session: CastSession, sessionId: String) = Unit
+
+        override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
+            if (!castMediaLoaded) {
+                sendVideoToTv(session)
+            }
+        }
+
+        override fun onSessionSuspended(session: CastSession, reason: Int) = Unit
+
+        override fun onSessionResumeFailed(session: CastSession, error: Int) {
+            Toast.makeText(this@PlayerActivity, "No se pudo reanudar la conexión con Google Cast", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    @OptIn(UnstableApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_player)
 
-        try {
-            playerView = findViewById(R.id.playerView)
-            mediaRouteButton = findViewById(R.id.mediaRouteButton)
-            btnScanDlna = findViewById(R.id.btnScanDlna)
-            btnListM3u8 = findViewById(R.id.btnListM3u8)
-            btnDownloadVideo = findViewById(R.id.btnDownloadVideo)
-            btnPasteM3u = findViewById(R.id.btnPasteM3u)
+        val playerView = findViewById<PlayerView>(R.id.playerView)
+        videoUrl = intent.getStringExtra("video_url")
+        val mediaUrl = videoUrl
+        videoTitle = intent.getStringExtra("video_title") ?: "Reproduciendo Video"
+        videoHeaders = parseVideoHeaders(intent.getStringExtra("video_headers_json"))
+        if (videoHeaders.headerValue("Cookie").isNullOrBlank() && !mediaUrl.isNullOrBlank()) {
+            CookieManager.getInstance().getCookie(mediaUrl)
+                ?.takeIf(String::isNotBlank)
+                ?.let { cookie -> videoHeaders = videoHeaders + ("Cookie" to cookie) }
+        }
+        videoReferer = videoHeaders.headerValue("Referer")
+            ?: intent.getStringExtra("video_referer")
+        val requestReferer = videoReferer ?: "https://google.com"
 
-            panelM3u8List = findViewById(R.id.panelM3u8List)
-            listViewM3u8 = findViewById(R.id.listViewM3u8)
-            btnClosePanel = findViewById(R.id.btnClosePanel)
-
-            listAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, m3u8ItemsList)
-            listViewM3u8.adapter = listAdapter
-
-            enableWifiMulticast()
-            requestAllPermissions()
-
-            mediaRouteSelector = MediaRouteSelector.Builder()
-                .addControlCategory(MediaControlIntent.CATEGORY_LIVE_VIDEO)
-                .addControlCategory(MediaControlIntent.CATEGORY_REMOTE_PLAYBACK)
-                .build()
-
-            mediaRouter = MediaRouter.getInstance(this)
-            mediaRouteButton.routeSelector = mediaRouteSelector!!
-
+        if (!mediaUrl.isNullOrEmpty()) {
             try {
-                CastButtonFactory.setUpMediaRouteButton(applicationContext, mediaRouteButton)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+                // Configurar Data Source HTTP con Headers personalizados (Referer y User-Agent) para soportar tokens de stream
+                val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+                    .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .setAllowCrossProtocolRedirects(true)
 
-            currentVideoUrl = intent.getStringExtra("EXTRA_VIDEO_URL")
-            if (!currentVideoUrl.isNullOrEmpty()) {
-                initializeMobilePlayer(currentVideoUrl!!)
-            } else {
-                Toast.makeText(this, "URL de video no válida", Toast.LENGTH_LONG).show()
-            }
+                val headers = mutableMapOf<String, String>()
+                headers["Referer"] = requestReferer
+                headers["Origin"] = requestReferer
+                httpDataSourceFactory.setDefaultRequestProperties(headers)
 
-            btnScanDlna.setOnClickListener {
-                if (connectedTv != null) {
-                    castVideoViaDlna(connectedTv!!, currentVideoUrl ?: "")
-                } else {
-                    startPowerfulTvDiscovery()
-                }
-            }
+                val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory)
 
-            btnListM3u8.setOnClickListener {
-                parseAndShowM3u8Content()
-            }
-
-            // Descarga garantizada para cualquier tipo de enlace (M3U, M3U8, MPD, MP4, etc.)
-            btnDownloadVideo.setOnClickListener {
-                downloadCurrentPlayingVideo()
-            }
-
-            btnPasteM3u.setOnClickListener {
-                showPasteDialog()
-            }
-
-            btnClosePanel.setOnClickListener {
-                panelM3u8List.visibility = View.GONE
-            }
-
-            listViewM3u8.setOnItemClickListener { _, _, position, _ ->
-                var selected = m3u8ItemsList[position]
-                if (selected.contains("http")) {
-                    selected = selected.substring(selected.indexOf("http"))
-                }
-                currentVideoUrl = selected
-                initializeMobilePlayer(selected)
-                Toast.makeText(this, "Cargando selección...", Toast.LENGTH_SHORT).show()
-
-                connectedTv?.let { tv ->
-                    castVideoViaDlna(tv, selected)
-                }
-            }
-
-        } catch (e: Exception) {
-            e.printStackTrace()
-            Toast.makeText(this, "Error en reproductor: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun showPasteDialog() {
-        val input = EditText(this)
-        input.hint = "https://ejemplo.com/stream.m3u8"
-        currentVideoUrl?.let { input.setText(it) }
-
-        AlertDialog.Builder(this)
-            .setTitle("Pegar Enlace M3U / M3U8")
-            .setView(input)
-            .setPositiveButton("Reproducir y Analizar") { _, _ ->
-                val typedUrl = input.text.toString().trim()
-                if (typedUrl.isNotEmpty()) {
-                    currentVideoUrl = typedUrl
-                    initializeMobilePlayer(typedUrl)
-                    parseAndShowM3u8Content()
-                } else {
-                    Toast.makeText(this, "El enlace no puede estar vacío", Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
-    private fun requestAllPermissions() {
-        val permissions = mutableListOf(
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        )
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
-        }
-        val missingPermissions = permissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missingPermissions.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, missingPermissions.toTypedArray(), 101)
-        }
-    }
-
-    private fun initializeMobilePlayer(url: String) {
-        try {
-            releasePlayer()
-            player = ExoPlayer.Builder(this).build().also { exoPlayer ->
-                playerView.player = exoPlayer
-
-                val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(url))
-                if (url.contains(".m3u8", ignoreCase = true) || url.contains(".m3u", ignoreCase = true)) {
-                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-                } else if (url.contains(".mpd", ignoreCase = true)) {
-                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
-                } else {
-                    mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP4)
-                }
-
-                exoPlayer.setMediaItem(mediaItemBuilder.build())
-                exoPlayer.prepare()
-                exoPlayer.playWhenReady = true
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    // Método de descarga incondicional del enlace cargado en el reproductor
-    private fun downloadCurrentPlayingVideo() {
-        val targetUrl = currentVideoUrl
-        if (targetUrl.isNullOrEmpty()) {
-            Toast.makeText(this, "No hay ningún video o enlace cargado para descargar", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        try {
-            Toast.makeText(this, "Iniciando descarga del enlace...", Toast.LENGTH_SHORT).show()
-
-            val uri = Uri.parse(targetUrl)
-            val request = DownloadManager.Request(uri)
-
-            val extension = when {
-                targetUrl.contains(".m3u8", ignoreCase = true) -> "m3u8"
-                targetUrl.contains(".m3u", ignoreCase = true) -> "m3u"
-                targetUrl.contains(".mpd", ignoreCase = true) -> "mpd"
-                targetUrl.contains(".webm", ignoreCase = true) -> "webm"
-                targetUrl.contains(".m4v", ignoreCase = true) -> "m4v"
-                else -> "mp4"
-            }
-
-            val fileName = "MiNavegador2_Media_${System.currentTimeMillis()}.$extension"
-
-            request.setTitle("MiNavegador2 - Descargando Enlace")
-            request.setDescription(targetUrl)
-            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-            request.setAllowedOverMetered(true)
-            request.setAllowedOverRoaming(true)
-
-            val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            downloadManager.enqueue(request)
-
-            Toast.makeText(this, "Descarga iniciada en carpeta Descargas", Toast.LENGTH_LONG).show()
-
-        } catch (e: Exception) {
-            e.printStackTrace()
-            Toast.makeText(this, "Error al descargar: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun parseAndShowM3u8Content() {
-        val urlStr = currentVideoUrl
-        if (urlStr.isNullOrEmpty()) {
-            Toast.makeText(this, "Primero pega o carga un enlace M3U8", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        Toast.makeText(this, "Analizando M3U8...", Toast.LENGTH_SHORT).show()
-
-        thread {
-            try {
-                val baseUrl = urlStr.substringBeforeLast("/") + "/"
-                val url = URL(urlStr)
-                val conn = url.openConnection() as HttpURLConnection
-                conn.connectTimeout = 5000
-                conn.readTimeout = 5000
-                conn.requestMethod = "GET"
-
-                if (conn.responseCode == 200) {
-                    val reader = BufferedReader(InputStreamReader(conn.inputStream))
-                    val lines = reader.readLines()
-                    conn.disconnect()
-
-                    val tempItems = ArrayList<String>()
-                    var lastQualityInfo = ""
-
-                    for (line in lines) {
-                        val trimmed = line.trim()
-                        if (trimmed.startsWith("#EXT-X-STREAM-INF")) {
-                            lastQualityInfo = trimmed
-                        } else if (trimmed.isNotBlank() && !trimmed.startsWith("#")) {
-                            val fullLink = if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-                                trimmed
-                            } else {
-                                baseUrl + trimmed
-                            }
-                            if (lastQualityInfo.isNotEmpty()) {
-                                tempItems.add("Calidad: $fullLink")
-                                lastQualityInfo = ""
-                            } else {
-                                tempItems.add(fullLink)
-                            }
-                        }
+                exoPlayer = ExoPlayer.Builder(this)
+                    .setMediaSourceFactory(mediaSourceFactory)
+                    .build().also { player ->
+                        playerView.player = player
+                        val mediaItem = MediaItem.fromUri(mediaUrl)
+                        player.setMediaItem(mediaItem)
+                        player.prepare()
+                        player.playWhenReady = true
                     }
 
-                    runOnUiThread {
-                        m3u8ItemsList.clear()
-                        if (tempItems.isEmpty()) {
-                            m3u8ItemsList.add(urlStr)
-                        } else {
-                            m3u8ItemsList.addAll(tempItems.take(50))
-                        }
-                        listAdapter.notifyDataSetChanged()
-                        panelM3u8List.visibility = View.VISIBLE
-                        Toast.makeText(this, "Lista M3U8 analizada", Toast.LENGTH_SHORT).show()
-                    }
-                }
+                Toast.makeText(this, "▶ Cargando: $videoTitle", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 e.printStackTrace()
-                runOnUiThread {
-                    Toast.makeText(this, "Error al leer M3U8: ${e.message}", Toast.LENGTH_LONG).show()
-                }
+                Toast.makeText(this, "Error al abrir el reproductor", Toast.LENGTH_SHORT).show()
             }
+        } else {
+            Toast.makeText(this, "URL de video no disponible", Toast.LENGTH_SHORT).show()
         }
-    }
 
-    private fun startPowerfulTvDiscovery() {
-        Toast.makeText(this, "Buscando Smart TVs en la red...", Toast.LENGTH_SHORT).show()
-        discoveredDevices.clear()
-
-        thread {
+        findViewById<Button>(R.id.btnScreenCast).setOnClickListener {
             try {
-                val ssdpQuery = "M-SEARCH * HTTP/1.1\r\n" +
-                        "HOST: 239.255.255.250:1900\r\n" +
-                        "MAN: \"ssdp:discover\"\r\n" +
-                        "MX: 3\r\n" +
-                        "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n"
-
-                val socket = DatagramSocket()
-                socket.soTimeout = 2000
-                val group = InetAddress.getByName("239.255.255.250")
-                val packet = DatagramPacket(ssdpQuery.toByteArray(), ssdpQuery.length, group, 1900)
-                socket.send(packet)
-
-                val buffer = ByteArray(2048)
-                val startTime = System.currentTimeMillis()
-                while (System.currentTimeMillis() - startTime < 2500) {
-                    try {
-                        val receivePacket = DatagramPacket(buffer, buffer.size)
-                        socket.receive(receivePacket)
-                        val response = String(receivePacket.data, 0, receivePacket.length)
-                        val ip = receivePacket.address.hostAddress ?: ""
-
-                        var locationUrl = ""
-                        response.lines().forEach { line ->
-                            if (line.lowercase().startsWith("location:")) {
-                                locationUrl = line.substring(9).trim()
-                            }
-                        }
-
-                        if (ip.isNotEmpty() && discoveredDevices.none { it.ip == ip }) {
-                            discoveredDevices.add(TvDevice("Smart TV DLNA ($ip)", ip, locationUrl))
-                        }
-                    } catch (e: Exception) {}
-                }
-                socket.close()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-
-            scanSamsungFallback()
-
-            runOnUiThread {
-                showDiscoveredDevicesDialog()
+                startActivity(Intent(Settings.ACTION_CAST_SETTINGS))
+            } catch (e: ActivityNotFoundException) {
+                Toast.makeText(this, "Este dispositivo no ofrece ajustes de duplicación de pantalla", Toast.LENGTH_LONG).show()
             }
         }
-    }
 
-    private fun scanSamsungFallback() {
+        findViewById<Button>(R.id.btnDlna).setOnClickListener {
+            discoverDlnaDevices()
+        }
+
+        findViewById<Button>(R.id.btnShareToTv).setOnClickListener {
+            shareVideoWithOtherApps()
+        }
+
+        val castButton = findViewById<MediaRouteButton>(R.id.castButton)
         try {
-            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            val ipAddress = wifiManager.connectionInfo.ipAddress
-            if (ipAddress == 0) return
-
-            val myIpSubnet = String.format(
-                "%d.%d.%d",
-                ipAddress and 0xff,
-                ipAddress shr 8 and 0xff,
-                ipAddress shr 16 and 0xff
-            )
-
-            for (i in 1..254) {
-                val targetIp = "$myIpSubnet.$i"
-                try {
-                    val url = URL("http://$targetIp:9197/dmr")
-                    val conn = url.openConnection() as HttpURLConnection
-                    conn.connectTimeout = 100
-                    conn.readTimeout = 100
-                    if (conn.responseCode == 200 || conn.responseCode == 404) {
-                        synchronized(discoveredDevices) {
-                            if (discoveredDevices.none { it.ip == targetIp }) {
-                                discoveredDevices.add(TvDevice("Samsung Smart TV DLNA ($targetIp)", targetIp, "http://$targetIp:9197/dmr"))
-                            }
-                        }
-                    }
-                    conn.disconnect()
-                } catch (e: Exception) {}
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+            castContext = CastContext.getSharedInstance(applicationContext)
+            CastButtonFactory.setUpMediaRouteButton(applicationContext, castButton)
+        } catch (e: IllegalStateException) {
+            castButton.isEnabled = false
+            Toast.makeText(this, "Google Cast no está disponible en este dispositivo", Toast.LENGTH_LONG).show()
         }
     }
 
-    private fun showDiscoveredDevicesDialog() {
-        if (discoveredDevices.isEmpty()) {
-            Toast.makeText(this, "No se encontraron Smart TVs DLNA en la red.", Toast.LENGTH_LONG).show()
-            return
-        }
-        val deviceNames = discoveredDevices.map { it.name }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("Seleccionar Smart TV para Transmitir")
-            .setItems(deviceNames) { _, index ->
-                val tv = discoveredDevices[index]
-                connectedTv = tv
-                btnScanDlna.text = "Transmitir en TV"
-                btnScanDlna.setBackgroundColor(android.graphics.Color.parseColor("#4CAF50"))
-                castVideoViaDlna(tv, currentVideoUrl ?: "")
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
+    override fun onResume() {
+        super.onResume()
+        val sessionManager = castContext?.sessionManager ?: return
+        sessionManager.addSessionManagerListener(castSessionListener, CastSession::class.java)
+        sessionManager.currentCastSession
+            ?.takeIf { it.isConnected && !castMediaLoaded }
+            ?.let(::sendVideoToTv)
     }
 
-    private fun castVideoViaDlna(tv: TvDevice, videoUrl: String) {
-        if (videoUrl.isEmpty()) {
-            Toast.makeText(this, "Primero selecciona o pega un video para transmitir", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        Toast.makeText(this, "Enviando video a la TV...", Toast.LENGTH_SHORT).show()
-
-        thread {
-            try {
-                val controlPort = 52235
-                val endpoint = "http://${tv.ip}:$controlPort/upnp/control/AVTransport1"
-
-                val soapBody = """
-                    <?xml version="1.0" encoding="utf-8"?>
-                    <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-                        <s:Body>
-                            <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-                                <InstanceID>0</InstanceID>
-                                <CurrentURI>$videoUrl</CurrentURI>
-                                <CurrentURIMetaData></CurrentURIMetaData>
-                            </u:SetAVTransportURI>
-                        </s:Body>
-                    </s:Envelope>
-                """.trimIndent()
-
-                val playSoapBody = """
-                    <?xml version="1.0" encoding="utf-8"?>
-                    <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-                        <s:Body>
-                            <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-                                <InstanceID>0</InstanceID>
-                                <Speed>1</Speed>
-                            </u:Play>
-                        </s:Body>
-                    </s:Envelope>
-                """.trimIndent()
-
-                sendSoapRequest(endpoint, "urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI", soapBody)
-                Thread.sleep(500)
-                sendSoapRequest(endpoint, "urn:schemas-upnp-org:service:AVTransport:1#Play", playSoapBody)
-
-                runOnUiThread {
-                    Toast.makeText(this, "¡Video transmitiendo en la TV!", Toast.LENGTH_LONG).show()
-                }
-
-            } catch (e: Exception) {
-                e.printStackTrace()
-                thread {
-                    try {
-                        val fallbackEndpoint = "http://${tv.ip}:9197/upnp/control/AVTransport1"
-                        val soapBody = """
-                            <?xml version="1.0" encoding="utf-8"?>
-                            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-                                <s:Body>
-                                    <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-                                        <InstanceID>0</InstanceID>
-                                        <CurrentURI>$videoUrl</CurrentURI>
-                                        <CurrentURIMetaData></CurrentURIMetaData>
-                                    </u:SetAVTransportURI>
-                                </s:Body>
-                            </s:Envelope>
-                        """.trimIndent()
-
-                        val playSoapBody = """
-                            <?xml version="1.0" encoding="utf-8"?>
-                            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-                                <s:Body>
-                                    <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-                                        <InstanceID>0</InstanceID>
-                                        <Speed>1</Speed>
-                                    </u:Play>
-                                </s:Body>
-                            </s:Envelope>
-                        """.trimIndent()
-
-                        sendSoapRequest(fallbackEndpoint, "urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI", soapBody)
-                        Thread.sleep(500)
-                        sendSoapRequest(fallbackEndpoint, "urn:schemas-upnp-org:service:AVTransport:1#Play", playSoapBody)
-
-                        runOnUiThread {
-                            Toast.makeText(this, "¡Video transmitiendo en la TV!", Toast.LENGTH_LONG).show()
-                        }
-                    } catch (err: Exception) {
-                        runOnUiThread {
-                            Toast.makeText(this, "Error de transmisión: ${err.message}", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun sendSoapRequest(urlStr: String, action: String, xmlPayload: String) {
-        val url = URL(urlStr)
-        val conn = url.openConnection() as HttpURLConnection
-        conn.connectTimeout = 3000
-        conn.readTimeout = 3000
-        conn.requestMethod = "POST"
-        conn.setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
-        conn.setRequestProperty("SOAPACTION", "\"$action\"")
-        conn.doOutput = true
-
-        val writer = OutputStreamWriter(conn.outputStream)
-        writer.write(xmlPayload)
-        writer.flush()
-        writer.close()
-        conn.disconnect()
-    }
-
-    private fun enableWifiMulticast() {
-        try {
-            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            multicastLock = wifi.createMulticastLock("MiNavegador2MulticastLock")
-            multicastLock?.setReferenceCounted(true)
-            multicastLock?.acquire()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun releasePlayer() {
-        player?.let {
-            it.release()
-            player = null
-        }
+    override fun onPause() {
+        castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)
+        super.onPause()
     }
 
     override fun onDestroy() {
+        activityScope.cancel()
         super.onDestroy()
-        try {
-            if (multicastLock?.isHeld == true) multicastLock?.release()
-        } catch (e: Exception) {
-            e.printStackTrace()
+        exoPlayer?.release()
+        exoPlayer = null
+        mediaRelayServer?.close()
+        mediaRelayServer = null
+    }
+
+    private fun sendVideoToTv(session: CastSession) {
+        val url = videoUrl
+        if (url.isNullOrBlank()) {
+            Toast.makeText(this, "No hay un video disponible para enviar", Toast.LENGTH_LONG).show()
+            return
         }
-        releasePlayer()
+
+        val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+            putString(MediaMetadata.KEY_TITLE, videoTitle)
+        }
+        val mediaInfo = MediaInfo.Builder(url)
+            .setContentType(DlnaManager.castContentTypeForUrl(url))
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setMetadata(metadata)
+            .build()
+        val remoteMediaClient = session.remoteMediaClient
+        if (remoteMediaClient == null) {
+            Toast.makeText(this, "Google Cast no está listo para reproducir", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        castMediaLoaded = true
+        exoPlayer?.pause()
+        remoteMediaClient.load(mediaInfo, true).setResultCallback { result ->
+            if (!result.status.isSuccess) {
+                castMediaLoaded = false
+                exoPlayer?.play()
+                Toast.makeText(this, "La TV no pudo reproducir este video", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun getVideoContentType(url: String): String {
+        return DlnaManager.contentTypeForUrl(url)
+    }
+
+    private fun discoverDlnaDevices() {
+        if (videoUrl.isNullOrBlank()) {
+            Toast.makeText(this, "No hay un video disponible para enviar", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        Toast.makeText(this, "Buscando TVs DLNA en la misma red Wi-Fi…", Toast.LENGTH_SHORT).show()
+        activityScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) { DlnaManager.discover(applicationContext) }
+            } catch (error: Exception) {
+                showConnectionError("No se pudieron buscar TVs DLNA: ${error.message}")
+                return@launch
+            }
+
+            if (result.devices.isEmpty()) {
+                val explanation = if (result.failedDescriptions > 0) {
+                    buildString {
+                        append("Se detectaron ${result.failedDescriptions} dispositivo(s), ")
+                        append("pero no se pudo leer su compatibilidad DLNA.")
+                        if (result.failureReasons.isNotEmpty()) {
+                            append("\n\n")
+                            append(result.failureReasons.joinToString("\n"))
+                        }
+                        append("\n\nConfirma que el teléfono y la TV estén en la misma Wi-Fi, ")
+                        append("sin red de invitados, y que la TV tenga activado DLNA.")
+                    }
+                } else {
+                    "No se encontraron TVs DLNA. Comprueba que ambos dispositivos estén en la misma Wi-Fi y que la TV tenga activado DLNA/compartir multimedia."
+                }
+                AlertDialog.Builder(this@PlayerActivity)
+                    .setTitle("No se encontraron TVs")
+                    .setMessage(explanation)
+                    .setPositiveButton("Aceptar", null)
+                    .show()
+                return@launch
+            }
+
+            val devices = result.devices
+            AlertDialog.Builder(this@PlayerActivity)
+                .setTitle("Elige una TV DLNA")
+                .setItems(devices.map { it.name }.toTypedArray()) { _, index ->
+                    sendVideoToDlnaDevice(devices[index])
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+    }
+
+    private fun sendVideoToDlnaDevice(device: DlnaDevice) {
+        val url = videoUrl ?: return
+        val contentType = getVideoContentType(url)
+        Toast.makeText(
+            this,
+            "Enviando ${contentType.substringAfterLast('/')} a ${device.name}…",
+            Toast.LENGTH_SHORT
+        ).show()
+        activityScope.launch {
+            try {
+                val relay = withContext(Dispatchers.IO) {
+                    val upstreamHeaders = videoHeaders.toMutableMap()
+                    videoReferer?.takeIf(String::isNotBlank)?.let { referer ->
+                        upstreamHeaders.putHeaderIfAbsent("Referer", referer)
+                        val parsedReferer = Uri.parse(referer)
+                        val origin = parsedReferer.authority?.let { authority ->
+                            "${parsedReferer.scheme}://$authority"
+                        }
+                        origin?.let { upstreamHeaders.putHeaderIfAbsent("Origin", it) }
+                    }
+                    upstreamHeaders.putHeaderIfAbsent(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
+                    )
+
+                    val newRelay = LocalMediaRelayServer.start(url, upstreamHeaders)
+                    try {
+                        DlnaManager.play(device, newRelay.url, videoTitle, contentType)
+                        newRelay
+                    } catch (error: Exception) {
+                        newRelay.close()
+                        throw error
+                    }
+                }
+                mediaRelayServer?.close()
+                mediaRelayServer = relay
+                exoPlayer?.pause()
+                Toast.makeText(
+                    this@PlayerActivity,
+                    "Video enviado a ${device.name}. Mantén el reproductor abierto mientras la TV lo recibe.",
+                    Toast.LENGTH_LONG
+                ).show()
+            } catch (error: Exception) {
+                showConnectionError("No se pudo reproducir en ${device.name}: ${error.message}")
+            }
+        }
+    }
+
+    private fun shareVideoWithOtherApps() {
+        val url = videoUrl
+        if (url.isNullOrBlank()) {
+            Toast.makeText(this, "No hay un video disponible para compartir", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, videoTitle)
+            putExtra(Intent.EXTRA_TEXT, url)
+        }
+        try {
+            startActivity(Intent.createChooser(shareIntent, "Abrir en una app de TV compatible"))
+        } catch (error: ActivityNotFoundException) {
+            showConnectionError("No hay ninguna app instalada para compartir el enlace")
+        }
+    }
+
+    private fun showConnectionError(message: String) {
+        if (isFinishing || isDestroyed) return
+        AlertDialog.Builder(this)
+            .setTitle("Problema al conectar")
+            .setMessage(message)
+            .setPositiveButton("Aceptar", null)
+            .show()
+    }
+
+    private fun parseVideoHeaders(json: String?): Map<String, String> {
+        if (json.isNullOrBlank()) return emptyMap()
+        return try {
+            val jsonObject = JSONObject(json)
+            buildMap {
+                val keys = jsonObject.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val value = jsonObject.optString(key).takeIf(String::isNotBlank) ?: continue
+                    put(key, value)
+                }
+            }
+        } catch (error: org.json.JSONException) {
+            Toast.makeText(this, "No se pudieron leer las cabeceras del video: ${error.message}", Toast.LENGTH_LONG).show()
+            emptyMap()
+        }
+    }
+
+    private fun Map<String, String>.headerValue(name: String): String? {
+        return entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+    }
+
+    private fun MutableMap<String, String>.putHeaderIfAbsent(name: String, value: String) {
+        if (keys.none { it.equals(name, ignoreCase = true) }) {
+            put(name, value)
+        }
     }
 }
